@@ -2,6 +2,44 @@
 #include "linenoise.h"
 
 
+
+
+class breakpoint 
+{
+    public:
+        breakpoint(pid_t pid, std::intptr_t addr) : m_pid{pid}, m_addr{addr}, m_enabled{false}, m_saved_data{} {}
+
+        void enable();
+        void disable();
+
+        bool is_enabled() const -> bool { return m_enabled; }
+        auto get_address() const -> std::intptr_t { return m_addr; }
+
+    private:
+        pid_t m_pid;
+        std::intptr_t m_addr;
+        bool m_enabled;
+        std::uint8_t m_saved_data; // original data at breakpoint address
+}
+
+void breakpoint::enable()
+{
+    auto data = ptrace(PTRACE_PEEKDATA, m_pid, m_addr, nullptr);
+    m_saved_data = static_cast<std::uint8_t>(data & 0xff); // save the original data
+    std::uint64_t int3 = 0xcc;
+    std::uint64_t data_with_int3 = ((data & ~0xff) | int3); // replace the original data with int3
+    ptrace(PTRACE_POKEDATA, m_pid, m_addr, data_with_int3);
+    m_enabled = true;
+}
+
+void breakpoint::disable()
+{
+    auto data = ptrace(PTRACE_PEEKDATA, m_pid, m_addr, nullptr);
+    auto restored_data = ((data & ~0xff) | m_saved_data);
+    ptrace(PTRACE_POKEDATA, m_pid, m_addr, restored_data);
+    m_enabled = false;
+}
+
 class debugger 
 {
 
@@ -10,6 +48,7 @@ class debugger
             : m_prog_name{std::move(prog_name)}, m_pid{pid} {}
 
         void run();
+        void set_breakpoint_at_address(std::intptr_t addr);
 
     private:
         void handle_command(const std::string& line);
@@ -18,7 +57,16 @@ class debugger
 
         std::string m_prog_name;
         pid_t m_pid;
+        std::unordered_map<std::intptr_t, breakpoint> m_breakpoints;
 
+}
+
+void debugger::set_breakpoint_at_address(std::intptr_t addr)
+{
+    std::cout << "Set breakpoint at address: " << std::hex << addr << std::endl;
+    breakpoint bp{m_pid, addr};
+    bp.enable();
+    m_breakpoints.insert({addr, bp});
 }
 
 void debugger::continue_execution() {
@@ -62,6 +110,8 @@ void debugger::handle_command(const std::string& line)
         if (args.size() != 2)
         {
             std::cerr << "usage: break <location>" << std::endl;
+            std::string addr = {args[1], std::size_t(2)};
+            set_breakpoint_at_address(std::stol(addr, 0, 16));
         }
     }
     else
