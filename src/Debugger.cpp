@@ -2,12 +2,11 @@
 #include "Debugger.hpp"
 
 void Debugger::run() {
-    int wait_status;
-    auto options = 0;
-    waitpid(m_pid, &wait_status, options);
+    wait_for_signal();
+    initialise_load_address();
 
     char* line = nullptr;
-    while((line = linenoise("minidbg> ")) != nullptr) {
+    while((line = linenoise("nip> ")) != nullptr) {
         handle_command(line);
         linenoiseHistoryAdd(line);
         linenoiseFree(line);
@@ -153,5 +152,127 @@ void Debugger::wait_for_signal() {
     int wait_status;
     auto options = 0;
     waitpid(m_pid, &wait_status, options);
+
+
+    auto siginfo = get_signal_info();
+    switch (siginfo.si_signo) {
+        case SIGTRAP:
+            handle_sigtrap(siginfo);
+            break;
+        case SIGSEGV:
+            std::cout << "SEGFAULT: " << siginfo.si_code << std::endl;
+            break;
+        default:
+            std::cout << "Unknown signal " << siginfo.si_signo << std::endl;
+            break;
+    }
 }
+
+dwarf::die Debugger::get_function_from_pc(uint64_t pc) {
+    auto& cu = m_dwarf.compilation_units()[0];
+    auto& root = cu.root();
+    auto iter = root.begin();
+    while (iter != root.end()) {
+        if (iter->tag == dwarf::DW_TAG::subprogram) {
+            auto low_pc = iter->find(dwarf::DW_AT::low_pc);
+            auto high_pc = iter->find(dwarf::DW_AT::high_pc);
+            if (low_pc != iter->end() && high_pc != iter->end()) {
+                if (pc >= low_pc->second.as_address() && pc < high_pc->second.as_address()) {
+                    return *iter;
+                }
+            }
+        }
+        ++iter;
+    }
+    return root;
+}
+
+
+dwarf::line_table::iterator Debugger::get_line_from_pc(uint64_t pc) {
+    auto& cu = m_dwarf.compilation_units()[0];
+    auto& line_table = cu.get_line_table();
+    auto iter = line_table.begin();
+    while (iter != line_table.end()) {
+        if (iter->address == pc) {
+            return iter;
+        }
+        ++iter;
+    }
+    return line_table.end();
+}
+
+
+void Debugger::initialise_load_entry()
+{
+    auto& cu = m_dwarf.compilation_units()[0];
+    auto& root = cu.root();
+    auto iter = root.begin();
+    while (iter != root.end()) {
+        if (iter->tag == dwarf::DW_TAG::subprogram) {
+            auto low_pc = iter->find(dwarf::DW_AT::low_pc);
+            auto high_pc = iter->find(dwarf::DW_AT::high_pc);
+            if (low_pc != iter->end() && high_pc != iter->end()) {
+                auto name = iter->find(dwarf::DW_AT::name);
+                if (name != iter->end()) {
+                    m_load_entry[name->second.as_string()] = {low_pc->second.as_address(), high_pc->second.as_address()};
+                }
+            }
+        }
+        ++iter;
+    }
+}
+
+
+uint64_t Debugger::offset_load_address(uint64_t addr)
+{
+    return addr - m_load_address;
+}
+
+void Debugger::print_source_line(
+    const std::string& file_name,
+    unsigned line,
+    unsigned line_context_size
+) {
+
+    std::ifstream file {file_name};
+
+    if (!file.is_open()) {
+        std::cerr << "Could not open file " << file_name << std::endl;
+        return;
+    }
+
+    auto start_line = line <= line_context_size ? 1 : line - line_context_size;
+    auto end_line = line + line_context_size + (line < line_context_size ? line_context_size - line : 0) + 1;
+
+    char c{};
+    auto current_line = 1u;
+    while (current_line != start_line && file.get(c)) {
+        if (c == '\n')
+        {
+            ++current_line;
+        }
+    }
+
+    std::cout << (current_line==line ? "> " : " ");
+
+    while (current_line <= end_line && file.get(c)) {
+        std::cout << c;
+        if (c == '\n')
+        {
+            ++current_line;
+            std::cout << (current_line==line ? "> " : " ");
+        }
+    }
+
+    std::cout << std::endl;
+}
+
+siginfo_t Debugger::get_signal_info() {
+    siginfo_t info;
+    ptrace(PTRACE_GETSIGINFO, m_pid, nullptr, &info);
+    return info;
+}
+
+
+
 
